@@ -1,6 +1,6 @@
 # SoilScan Sentinel-2 API
 
-A FastAPI backend that accepts a GIS polygon, queries locally downloaded Sentinel-2 satellite imagery and SoilGrids soil property data, and returns soil nutrient predictions using trained machine learning models.
+A FastAPI backend that accepts a GIS polygon or bounding box, queries locally downloaded Sentinel-2 satellite imagery and SoilGrids soil property data, and returns soil nutrient predictions using trained machine learning models.
 
 ## What it predicts
 
@@ -25,9 +25,11 @@ A FastAPI backend that accepts a GIS polygon, queries locally downloaded Sentine
 
 ```
 ├── main.py                        # FastAPI app entry point
+├── nixpacks.toml                  # Railway build config (GDAL/PROJ/GEOS system deps)
+├── railway.json                   # Railway start command
 ├── app/
 │   ├── core/config.py             # Settings (configurable via env vars)
-│   ├── api/predict.py             # POST /predict route
+│   ├── api/predict.py             # GET + POST /predict routes
 │   ├── schemas/predict.py         # Pydantic request / response models
 │   └── services/
 │       ├── polygon_sampler.py     # UTM grid sampling from GeoJSON polygon
@@ -36,61 +38,58 @@ A FastAPI backend that accepts a GIS polygon, queries locally downloaded Sentine
 │       ├── terrain_extractor.py   # DEM terrain attribute extraction
 │       ├── spectral_indices.py    # Spectral index computation
 │       └── predictor.py           # Model loading, feature assembly, inference
+├── models/                        # Trained .joblib pipelines + _meta.json (in git)
 ├── data/
-│   ├── sentinel2/                 # Place .SAFE tile directories here
-│   ├── soilgrids/                 # Place SoilGrids GeoTIFF/VRT files here
-│   └── dem/                       # Place DEM GeoTIFF here
-├── models/                        # Place .joblib + _meta.json model files here
+│   ├── sentinel2/                 # .SAFE tile directories (Railway Volume)
+│   ├── soilgrids/                 # SoilGrids GeoTIFF/VRT files (Railway Volume)
+│   └── dem/                       # DEM GeoTIFF (Railway Volume)
 └── scripts/
     └── preprocess_terrain.py      # One-time terrain raster generation from DEM
 ```
 
 ## Deploying to Railway
 
-### 1. Create a Volume for large data files
+The repo is ready to deploy directly from GitHub. Railway auto-builds on every push using Nixpacks (GDAL, PROJ, GEOS system packages are declared in `nixpacks.toml`). The trained models are already committed to `models/`.
 
-Sentinel-2 `.SAFE` tiles and SoilGrids GeoTIFFs are GB-scale and must not be committed to git. Store them on a Railway persistent Volume.
+The only setup required is a **persistent Volume** for the large geospatial data files that cannot live in git.
 
-In the Railway dashboard:
-1. Open your project → **New** → **Volume**
+### 1. Connect the GitHub repo
+
+In the Railway dashboard: **New Project → Deploy from GitHub repo** → select this repo.
+
+### 2. Create a Volume for data files
+
+1. Inside the project → **New** → **Volume**
 2. Name it `soilscan-data`, mount path `/mnt/soilscan-data`
-3. Attach it to this service
+3. Attach it to the service
 
-### 2. Upload data to the Volume
+### 3. Upload data to the Volume
 
-Use the Railway shell (service → **Shell** tab) to copy your files into the volume:
+Open the Railway shell (service → **Shell** tab) and place your files at:
 
-```bash
-# From a machine that has the data, rsync via Railway CLI
-railway shell
-# Then move files into /mnt/soilscan-data/sentinel2/, /soilgrids/, /dem/
-```
-
-Expected layout inside the volume:
 ```
 /mnt/soilscan-data/
 ├── sentinel2/
 │   └── S2B_MSIL2A_....SAFE/
+│       └── GRANULE/*/IMG_DATA/{R10m,R20m,R60m}/*.jp2
 ├── soilgrids/
 │   ├── phh2o/phh2o_0-5cm_mean.tif
-│   └── ...
+│   ├── phh2o/phh2o_5-15cm_mean.tif
+│   ├── soc/soc_0-5cm_mean.tif
+│   ├── soc/soc_5-15cm_mean.tif
+│   ├── nitrogen/nitrogen_0-5cm_mean.tif
+│   ├── nitrogen/nitrogen_5-15cm_mean.tif
+│   ├── clay/clay_0-5cm_mean.tif
+│   ├── clay/clay_5-15cm_mean.tif
+│   ├── sand/sand_0-5cm_mean.tif
+│   ├── sand/sand_5-15cm_mean.tif
+│   ├── cec/cec_0-5cm_mean.tif
+│   └── cec/cec_5-15cm_mean.tif
 └── dem/
     └── dem.tif
 ```
 
-### 3. Add model files to the repo
-
-The trained models are small (~4 MB each) and live in git. Copy them from the training repository:
-
-```
-models/
-├── n_RandomForest.joblib + n_RandomForest_meta.json
-├── p_RandomForest.joblib + p_RandomForest_meta.json
-├── k_SVM.joblib          + k_SVM_meta.json
-└── ph_RandomForest.joblib + ph_RandomForest_meta.json
-```
-
-### 4. Set environment variables in Railway
+### 4. Set environment variables
 
 | Variable | Value |
 |----------|-------|
@@ -99,9 +98,7 @@ models/
 | `SOILSCAN_DEM_PATH` | `/mnt/soilscan-data/dem/dem.tif` |
 | `SOILSCAN_MODELS_DIR` | `models` |
 
-### 5. Deploy
-
-Push to the connected GitHub repo — Railway builds and deploys automatically via Nixpacks.
+After that, every `git push` redeploys automatically with zero data loss — the Volume persists across deploys.
 
 ---
 
@@ -113,23 +110,7 @@ Push to the connected GitHub repo — Railway builds and deploys automatically v
 pip install -r requirements.txt
 ```
 
-### 2. Add model files
-
-Copy from the training repository into `models/`:
-
-```
-models/
-├── n_RandomForest.joblib
-├── n_RandomForest_meta.json
-├── p_RandomForest.joblib
-├── p_RandomForest_meta.json
-├── k_SVM.joblib
-├── k_SVM_meta.json
-├── ph_RandomForest.joblib
-└── ph_RandomForest_meta.json
-```
-
-### 3. Add data files
+### 2. Add data files
 
 **Sentinel-2** — place downloaded `.SAFE` directories inside `data/sentinel2/`:
 ```
@@ -144,35 +125,29 @@ data/soilgrids/
 ├── phh2o/phh2o_0-5cm_mean.tif
 ├── phh2o/phh2o_5-15cm_mean.tif
 ├── soc/soc_0-5cm_mean.tif
-├── soc/soc_5-15cm_mean.tif
-├── nitrogen/nitrogen_0-5cm_mean.tif
-├── nitrogen/nitrogen_5-15cm_mean.tif
-├── clay/clay_0-5cm_mean.tif
-├── clay/clay_5-15cm_mean.tif
-├── sand/sand_0-5cm_mean.tif
-├── sand/sand_5-15cm_mean.tif
-├── cec/cec_0-5cm_mean.tif
-└── cec/cec_5-15cm_mean.tif
+...
 ```
 
 **DEM** — place a GeoTIFF at `data/dem/dem.tif`.
 
-Optionally pre-compute terrain rasters for better TWI accuracy (requires `richdem`):
+Optionally pre-compute terrain rasters for more accurate TWI (requires `richdem`):
 ```bash
 python scripts/preprocess_terrain.py --dem data/dem/dem.tif
 ```
 
-### 4. Run the server
+### 3. Run the server
 
 ```bash
 hypercorn main:app --reload
 ```
 
-The interactive API docs are available at `http://localhost:8000/docs`.
+Interactive API docs: `http://localhost:8000/docs`
+
+---
 
 ## API reference
 
-### `GET /predict` — bounding box (quick queries)
+### `GET /predict` — bounding box
 
 ```
 GET /predict?minlon=120.50&minlat=16.40&maxlon=120.51&maxlat=16.41&crop_type=cabbage
@@ -184,16 +159,12 @@ GET /predict?minlon=120.50&minlat=16.40&maxlon=120.51&maxlat=16.41&crop_type=cab
 | `minlat` | float | required | South boundary latitude |
 | `maxlon` | float | required | East boundary longitude |
 | `maxlat` | float | required | North boundary latitude |
-| `crop_type` | string | `"unknown"` | Crop at the field (cabbage, tomato, potato, …) |
+| `crop_type` | string | `"unknown"` | Crop type (cabbage, tomato, potato, …) |
 | `temperature_c` | float | 18.0 | Air temperature in °C |
 | `humidity_percent` | float | 80.0 | Relative humidity % |
 | `sample_spacing_m` | float 5–100 | 10.0 | Grid spacing in metres |
 
-The bbox is converted to a rectangular polygon internally — same pipeline as POST.
-
----
-
-### `POST /predict` — GeoJSON polygon (exact field boundaries)
+### `POST /predict` — GeoJSON polygon
 
 **Request body**
 
@@ -213,26 +184,26 @@ The bbox is converted to a rectangular polygon internally — same pipeline as P
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `polygon` | GeoJSON Geometry | required | Polygon or MultiPolygon |
-| `crop_type` | string | `"unknown"` | Crop at the field (cabbage, tomato, potato, …) |
+| `crop_type` | string | `"unknown"` | Crop type (cabbage, tomato, potato, …) |
 | `temperature_c` | float | 18.0 | Air temperature in °C |
 | `humidity_percent` | float | 80.0 | Relative humidity % |
 | `sample_spacing_m` | float 5–100 | 10.0 | Grid spacing in metres |
 
-**Response**
+**Response** (same shape for both GET and POST)
 
 ```json
 {
   "nitrogen": {
     "dominant_class": "Low",
     "class_distribution": {"Low": 0.72, "Medium": 0.28, "High": 0.0},
-    "mean_probability": {"Low": 0.68, "Medium": 0.29, "High": 0.03}
+    "mean_probability":   {"Low": 0.68, "Medium": 0.29, "High": 0.03}
   },
   "phosphorus": { "..." },
-  "potassium": { "..." },
+  "potassium":  { "..." },
   "ph": {
     "dominant_class": "6.4",
-    "class_distribution": {"4.0": 0.0, "6.4": 0.61, "6.8": 0.39, "...": 0.0},
-    "mean_probability": { "..." }
+    "class_distribution": {"4.0": 0.0, "6.4": 0.61, "6.8": 0.39},
+    "mean_probability":   {"4.0": 0.0, "6.4": 0.58, "6.8": 0.41}
   },
   "sample_count": 143,
   "polygon_area_ha": 1.43,
@@ -243,6 +214,8 @@ The bbox is converted to a rectangular polygon internally — same pipeline as P
 ### `GET /health`
 
 Returns `{"status": "ok"}`.
+
+---
 
 ## Configuration
 
@@ -255,6 +228,6 @@ All settings can be overridden with environment variables (prefix `SOILSCAN_`):
 | `SOILSCAN_DEM_PATH` | `data/dem/dem.tif` | Path to DEM GeoTIFF |
 | `SOILSCAN_MODELS_DIR` | `models` | Path to .joblib model files |
 | `SOILSCAN_MAX_SAMPLE_POINTS` | `500` | Cap on grid points per request |
-| `SOILSCAN_DEFAULT_SAMPLE_SPACING_M` | `10.0` | Default grid spacing |
-| `SOILSCAN_DEFAULT_TEMPERATURE_C` | `18.0` | Fallback air temperature |
-| `SOILSCAN_DEFAULT_HUMIDITY_PERCENT` | `80.0` | Fallback relative humidity |
+| `SOILSCAN_DEFAULT_SAMPLE_SPACING_M` | `10.0` | Default grid spacing in metres |
+| `SOILSCAN_DEFAULT_TEMPERATURE_C` | `18.0` | Fallback air temperature (°C) |
+| `SOILSCAN_DEFAULT_HUMIDITY_PERCENT` | `80.0` | Fallback relative humidity (%) |
