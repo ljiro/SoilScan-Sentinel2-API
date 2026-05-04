@@ -108,32 +108,24 @@ def _reproject_band(
         return None
 
 
-def _write_geotiff(path: Path, data: np.ndarray, transform, crs):
-    """Write (12, H, W) float32 array as a compressed GeoTIFF."""
-    n_bands, height, width = data.shape
-    with rasterio.open(
-        path, "w",
-        driver="GTiff",
-        height=height,
-        width=width,
-        count=n_bands,
-        dtype="float32",
-        crs=crs,
-        transform=transform,
-        compress="deflate",
-        predictor=2,       # horizontal differencing — good for float rasters
-        nodata=np.nan,
-    ) as dst:
-        dst.write(data)
-        # Tag each band with its name for readability
-        for i, name in enumerate(BAND_NAMES, start=1):
-            dst.update_tags(i, name=name)
-    print(f"  written: {path}  ({path.stat().st_size / 1e6:.1f} MB)")
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+def _open_output(path: Path, transform, width: int, height: int) -> rasterio.DatasetWriter:
+    return rasterio.open(
+        path, "w",
+        driver="GTiff",
+        height=height, width=width,
+        count=len(BAND_NAMES),
+        dtype="float32",
+        crs=TARGET_CRS,
+        transform=transform,
+        compress="deflate",
+        predictor=2,
+        nodata=np.nan,
+    )
+
 
 def preprocess(safe_dir: Path, out_dir: Path, aoi: Tuple[float, float, float, float]):
     safe_dirs = sorted(safe_dir.glob("*.SAFE"))
@@ -145,42 +137,53 @@ def preprocess(safe_dir: Path, out_dir: Path, aoi: Tuple[float, float, float, fl
     print(f"Target grid: {width} × {height} px at {TARGET_RES_M} m  ({TARGET_CRS.to_epsg()})")
     print(f"AOI (WGS84): lon {aoi[0]}–{aoi[2]}  lat {aoi[1]}–{aoi[3]}")
 
-    # Shape: (n_tiles, 12, H, W)
-    all_tiles: List[np.ndarray] = []
-
+    # Collect band file maps per tile upfront
+    all_band_files = []
     for tile_path in safe_dirs:
-        print(f"\nProcessing: {tile_path.name}")
-        band_files = _find_band_files(tile_path)
-        tile = np.full((len(BAND_NAMES), height, width), np.nan, dtype=np.float32)
-
-        for j, band in enumerate(BAND_NAMES):
-            if band not in band_files:
-                print(f"  [warn] {band} not found — will be NaN")
-                continue
-            print(f"  {band} ...", end=" ", flush=True)
-            arr = _reproject_band(band_files[band], transform, width, height)
-            if arr is not None:
-                tile[j] = arr
-                valid = np.sum(~np.isnan(arr))
-                print(f"{valid:,} valid px")
-
-        all_tiles.append(tile)
-
-    stacked = np.stack(all_tiles, axis=0)                    # (T, 12, H, W)
-    means   = np.nanmean(stacked, axis=0).astype(np.float32) # (12, H, W)
-    stds    = (
-        np.nanstd(stacked, axis=0).astype(np.float32)
-        if len(all_tiles) > 1
-        else np.full_like(means, np.nan)
-    )
+        bf = _find_band_files(tile_path)
+        if bf:
+            all_band_files.append((tile_path.name, bf))
+    n_tiles = len(all_band_files)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    print("\nWriting output files...")
-    _write_geotiff(out_dir / "bands_mean.tif", means, transform, TARGET_CRS)
-    _write_geotiff(out_dir / "bands_std.tif",  stds,  transform, TARGET_CRS)
-    print("\nDone. Upload these two files to the Railway Volume at:")
-    print(f"  /mnt/soilscan-data/sentinel2/bands_mean.tif")
-    print(f"  /mnt/soilscan-data/sentinel2/bands_std.tif")
+    mean_path = out_dir / "bands_mean.tif"
+    std_path  = out_dir / "bands_std.tif"
+
+    # Process one band at a time to keep peak RAM at ~1 band × n_tiles
+    with _open_output(mean_path, transform, width, height) as mean_ds, \
+         _open_output(std_path,  transform, width, height) as std_ds:
+
+        for j, band in enumerate(BAND_NAMES, start=1):
+            print(f"\n[{j:02d}/12] {band}")
+            band_arrays: List[np.ndarray] = []
+
+            for tile_name, band_files in all_band_files:
+                print(f"  {tile_name[:40]} ...", end=" ", flush=True)
+                if band not in band_files:
+                    print("not found — NaN")
+                    band_arrays.append(np.full((height, width), np.nan, dtype=np.float32))
+                    continue
+                arr = _reproject_band(band_files[band], transform, width, height)
+                if arr is None:
+                    arr = np.full((height, width), np.nan, dtype=np.float32)
+                valid = int(np.sum(~np.isnan(arr)))
+                print(f"{valid:,} valid px")
+                band_arrays.append(arr)
+
+            stacked = np.stack(band_arrays, axis=0)  # (T, H, W)
+            mean_ds.write(np.nanmean(stacked, axis=0).astype(np.float32), j)
+            std_ds.write(
+                np.nanstd(stacked, axis=0).astype(np.float32) if n_tiles > 1
+                else np.full((height, width), np.nan, dtype=np.float32),
+                j,
+            )
+
+    print(f"\nDone.")
+    print(f"  {mean_path}  ({mean_path.stat().st_size / 1e6:.1f} MB)")
+    print(f"  {std_path}   ({std_path.stat().st_size  / 1e6:.1f} MB)")
+    print("\nUpload both files to the Railway Volume at:")
+    print("  /mnt/soilscan-data/sentinel2/bands_mean.tif")
+    print("  /mnt/soilscan-data/sentinel2/bands_std.tif")
 
 
 if __name__ == "__main__":
