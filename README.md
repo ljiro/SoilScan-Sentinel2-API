@@ -112,7 +112,28 @@ The interactive API docs are available at `http://localhost:8000/docs`.
 
 ## API reference
 
-### `POST /predict`
+### `GET /predict` — bounding box (quick queries)
+
+```
+GET /predict?minlon=120.50&minlat=16.40&maxlon=120.51&maxlat=16.41&crop_type=cabbage
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `minlon` | float | required | West boundary longitude |
+| `minlat` | float | required | South boundary latitude |
+| `maxlon` | float | required | East boundary longitude |
+| `maxlat` | float | required | North boundary latitude |
+| `crop_type` | string | `"unknown"` | Crop at the field (cabbage, tomato, potato, …) |
+| `temperature_c` | float | 18.0 | Air temperature in °C |
+| `humidity_percent` | float | 80.0 | Relative humidity % |
+| `sample_spacing_m` | float 5–100 | 10.0 | Grid spacing in metres |
+
+The bbox is converted to a rectangular polygon internally — same pipeline as POST.
+
+---
+
+### `POST /predict` — GeoJSON polygon (exact field boundaries)
 
 **Request body**
 
