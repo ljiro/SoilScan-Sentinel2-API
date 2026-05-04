@@ -45,7 +45,67 @@ A FastAPI backend that accepts a GIS polygon, queries locally downloaded Sentine
     └── preprocess_terrain.py      # One-time terrain raster generation from DEM
 ```
 
-## Setup
+## Deploying to Railway
+
+### 1. Create a Volume for large data files
+
+Sentinel-2 `.SAFE` tiles and SoilGrids GeoTIFFs are GB-scale and must not be committed to git. Store them on a Railway persistent Volume.
+
+In the Railway dashboard:
+1. Open your project → **New** → **Volume**
+2. Name it `soilscan-data`, mount path `/mnt/soilscan-data`
+3. Attach it to this service
+
+### 2. Upload data to the Volume
+
+Use the Railway shell (service → **Shell** tab) to copy your files into the volume:
+
+```bash
+# From a machine that has the data, rsync via Railway CLI
+railway shell
+# Then move files into /mnt/soilscan-data/sentinel2/, /soilgrids/, /dem/
+```
+
+Expected layout inside the volume:
+```
+/mnt/soilscan-data/
+├── sentinel2/
+│   └── S2B_MSIL2A_....SAFE/
+├── soilgrids/
+│   ├── phh2o/phh2o_0-5cm_mean.tif
+│   └── ...
+└── dem/
+    └── dem.tif
+```
+
+### 3. Add model files to the repo
+
+The trained models are small (~4 MB each) and live in git. Copy them from the training repository:
+
+```
+models/
+├── n_RandomForest.joblib + n_RandomForest_meta.json
+├── p_RandomForest.joblib + p_RandomForest_meta.json
+├── k_SVM.joblib          + k_SVM_meta.json
+└── ph_RandomForest.joblib + ph_RandomForest_meta.json
+```
+
+### 4. Set environment variables in Railway
+
+| Variable | Value |
+|----------|-------|
+| `SOILSCAN_SENTINEL2_DIR` | `/mnt/soilscan-data/sentinel2` |
+| `SOILSCAN_SOILGRIDS_DIR` | `/mnt/soilscan-data/soilgrids` |
+| `SOILSCAN_DEM_PATH` | `/mnt/soilscan-data/dem/dem.tif` |
+| `SOILSCAN_MODELS_DIR` | `models` |
+
+### 5. Deploy
+
+Push to the connected GitHub repo — Railway builds and deploys automatically via Nixpacks.
+
+---
+
+## Local setup
 
 ### 1. Install dependencies
 
@@ -55,7 +115,7 @@ pip install -r requirements.txt
 
 ### 2. Add model files
 
-Copy the trained model files from the training repository into `models/`:
+Copy from the training repository into `models/`:
 
 ```
 models/

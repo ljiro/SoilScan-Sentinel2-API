@@ -1,0 +1,9 @@
+[phases.setup]
+# GDAL, PROJ, GEOS — required by rasterio and pyproj
+nixPkgs = ["gdal", "proj", "geos", "libspatialindex"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "hypercorn main:app --bind \"[::]:$PORT\""
