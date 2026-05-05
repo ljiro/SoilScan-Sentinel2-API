@@ -1,5 +1,6 @@
 from typing import Optional
 
+import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import settings
