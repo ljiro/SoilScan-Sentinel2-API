@@ -13,6 +13,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+import gdown
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
@@ -84,10 +85,12 @@ def download_file(
     dest: Path = _TARGETS[req.target]()
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    download_url = _resolve_gdrive_url(req.url)
-
     try:
-        urllib.request.urlretrieve(download_url, dest)
+        if _GDRIVE_RE.search(req.url):
+            # gdown handles Google Drive's large-file confirmation page automatically
+            gdown.download(req.url, str(dest), quiet=False, fuzzy=True)
+        else:
+            urllib.request.urlretrieve(req.url, dest)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Download failed: {exc}")
 
