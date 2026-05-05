@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.api.predict import router as predict_router
+from app.api.admin import router as admin_router
 
 app = FastAPI(
     title="SoilScan Sentinel-2 API",
@@ -13,6 +14,7 @@ app = FastAPI(
 )
 
 app.include_router(predict_router, tags=["Inference"])
+app.include_router(admin_router, tags=["Admin"])
 
 
 @app.get("/health", tags=["Health"])
