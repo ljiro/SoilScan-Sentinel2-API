@@ -121,6 +121,31 @@ def list_dir(
     return {"base": path, "files": result}
 
 
+@router.post("/fix-paths")
+def fix_backslash_paths(x_admin_token: Optional[str] = Header(default=None)):
+    """
+    Find files with Windows backslash characters in their names and move them
+    to the correct subdirectory paths. Run once after a Windows-created zip upload.
+    """
+    _check_token(x_admin_token)
+    moved, errors = [], []
+    for base_dir in [settings.soilgrids_dir, settings.sentinel2_dir]:
+        if not base_dir.exists():
+            continue
+        for item in list(base_dir.iterdir()):
+            if "\\" in item.name:
+                # e.g. "clay\clay_0-5cm_mean.tif" → clay/clay_0-5cm_mean.tif
+                parts = [p for p in item.name.replace("\\", "/").split("/") if p]
+                correct = base_dir.joinpath(*parts)
+                try:
+                    correct.parent.mkdir(parents=True, exist_ok=True)
+                    item.rename(correct)
+                    moved.append(f"{item} → {correct}")
+                except Exception as exc:
+                    errors.append(f"{item}: {exc}")
+    return {"moved": moved, "errors": errors}
+
+
 @router.get("/targets")
 def list_targets(x_admin_token: Optional[str] = Header(default=None)):
     """List all valid download target names and their resolved paths."""
