@@ -8,6 +8,7 @@ POST /admin/download
 Predefined targets map friendly names to the correct Volume paths so callers
 don't need to know the internal directory layout.
 """
+import os
 import re
 import tempfile
 import urllib.request
@@ -103,6 +104,21 @@ def download_file(
         "dest": str(dest),
         "size_mb": round(size_mb, 2),
     }
+
+
+@router.get("/ls")
+def list_dir(
+    path: str = "/mnt/soilscan-data",
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """List files under a directory path (default: /mnt/soilscan-data)."""
+    _check_token(x_admin_token)
+    result = {}
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            fp = Path(root) / f
+            result[str(fp)] = round(fp.stat().st_size / 1e6, 3)
+    return {"base": path, "files": result}
 
 
 @router.get("/targets")
