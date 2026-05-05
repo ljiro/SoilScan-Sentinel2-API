@@ -88,7 +88,7 @@ def download_file(
     try:
         if _GDRIVE_RE.search(req.url):
             # gdown handles Google Drive's large-file confirmation page automatically
-            gdown.download(req.url, str(dest), quiet=False, fuzzy=True)
+            gdown.download(req.url, str(dest), quiet=False)
         else:
             urllib.request.urlretrieve(req.url, dest)
     except Exception as exc:
