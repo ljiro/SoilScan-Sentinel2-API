@@ -72,7 +72,9 @@ async def _run_predict(
 
     terrain_data = extract_terrain(settings.dem_path, points)
     if terrain_data is None:
-        warnings.append("DEM not found — terrain features will be NaN (imputed by model).")
+        warnings.append("DEM unavailable and all fallbacks failed — terrain features are NaN.")
+    elif np.all(np.isnan(terrain_data[:, 1:])):
+        warnings.append("DEM not available locally — elevation from Open-Elevation API; slope/aspect/TWI are NaN.")
 
     temp = temperature_c if temperature_c is not None else settings.default_temperature_c
     humid = humidity_percent if humidity_percent is not None else settings.default_humidity_percent

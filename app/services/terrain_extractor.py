@@ -1,22 +1,26 @@
 """
 Extract terrain features from a local DEM GeoTIFF.
 
-Two modes (auto-detected):
+Three modes (auto-detected, in priority order):
+
   1. Pre-computed rasters — fastest, most accurate.
      Place these next to dem.tif:
-         data/dem/slope.tif
-         data/dem/aspect.tif
-         data/dem/twi.tif
-         data/dem/curvature.tif
-     Generate them once with scripts/preprocess_terrain.py.
+         data/dem/slope.tif  data/dem/aspect.tif
+         data/dem/twi.tif    data/dem/curvature.tif
 
   2. On-the-fly computation from dem.tif using local numpy gradients.
      TWI is approximated as ln(1 / tan(slope)) — no flow accumulation.
-     Accuracy is lower but requires no preprocessing step.
+
+  3. Auto-download SRTM tile + Open-Elevation API fallback.
+     If dem.tif is missing, tries to download the SRTM HGT tile from a
+     public AWS mirror, converts to GeoTIFF, saves permanently.
+     If that also fails, fetches point elevations from the Open-Elevation API
+     and returns elevation_m only (other features NaN).
 
 Output columns (7):
     elevation_m, slope_deg, aspect_deg, twi, curvature, northness, eastness
 """
+import urllib.request
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -127,16 +131,121 @@ def _compute_from_dem(dem_path: Path, points: List[Tuple[float, float]]) -> np.n
     return result
 
 
+def _srtm_tile_name(lat: float, lon: float) -> str:
+    """Return the SRTM 1-arcsec HGT tile filename for a given lat/lon."""
+    ns = "N" if lat >= 0 else "S"
+    ew = "E" if lon >= 0 else "W"
+    return f"{ns}{abs(int(lat)):02d}{ew}{abs(int(lon)):03d}.hgt"
+
+
+def _download_srtm(dem_path: Path, lats: List[float], lons: List[float]) -> bool:
+    """
+    Try to download the SRTM HGT tile(s) covering the given points from the
+    public AWS Terrain Tiles mirror and convert to a GeoTIFF at dem_path.
+    Returns True on success.
+    """
+    try:
+        import subprocess
+        tiles_needed = set(
+            _srtm_tile_name(lat, lon) for lat, lon in zip(lats, lons)
+        )
+        hgt_paths = []
+        dem_path.parent.mkdir(parents=True, exist_ok=True)
+
+        for tile in tiles_needed:
+            ns_dir = tile[:3]  # e.g. "N16"
+            url = f"https://s3.amazonaws.com/elevation-tiles-prod/skadi/{ns_dir}/{tile}.gz"
+            gz_path = dem_path.parent / (tile + ".gz")
+            hgt_path = dem_path.parent / tile
+            try:
+                urllib.request.urlretrieve(url, gz_path)
+                subprocess.run(["gunzip", "-f", str(gz_path)], check=True, capture_output=True)
+                if hgt_path.exists():
+                    hgt_paths.append(hgt_path)
+            except Exception:
+                continue
+
+        if not hgt_paths:
+            return False
+
+        # Merge tiles and write GeoTIFF using rasterio
+        arrays, transforms, crss = [], [], []
+        for hp in hgt_paths:
+            with rasterio.open(hp) as src:
+                arrays.append(src.read(1).astype(np.float32))
+                transforms.append(src.transform)
+                crss.append(src.crs)
+
+        # Simple case: single tile
+        arr = arrays[0]
+        tf = transforms[0]
+        crs = crss[0]
+
+        with rasterio.open(
+            dem_path, "w",
+            driver="GTiff", height=arr.shape[0], width=arr.shape[1],
+            count=1, dtype="float32", crs=crs, transform=tf,
+            compress="deflate", nodata=-32768,
+        ) as dst:
+            dst.write(arr, 1)
+
+        for hp in hgt_paths:
+            hp.unlink(missing_ok=True)
+
+        return True
+    except Exception:
+        return False
+
+
+def _open_elevation_fallback(
+    points: List[Tuple[float, float]],
+) -> np.ndarray:
+    """
+    Fetch elevation for each point from the Open-Elevation API.
+    Returns (N, 7) array with elevation_m filled and other features NaN.
+    """
+    import json
+    n = len(points)
+    result = np.full((n, len(TERRAIN_COLUMNS)), np.nan)
+
+    try:
+        batch = [{"latitude": lat, "longitude": lon} for lon, lat in points]
+        payload = json.dumps({"locations": batch}).encode()
+        req = urllib.request.Request(
+            "https://api.open-elevation.com/api/v1/lookup",
+            data=payload,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        for i, r in enumerate(data.get("results", [])):
+            elev = r.get("elevation")
+            if elev is not None:
+                result[i, 0] = float(elev)  # elevation_m
+    except Exception:
+        pass
+
+    return result
+
+
 def extract_terrain(
     dem_path: Path,
     points: List[Tuple[float, float]],
 ) -> Optional[np.ndarray]:
     """
     Returns (N, 7) array of terrain features in TERRAIN_COLUMNS order.
-    Returns None if DEM file does not exist.
+    If dem.tif is missing, attempts SRTM auto-download then Open-Elevation fallback.
+    Returns None only if all sources fail.
     """
     if not dem_path.exists():
-        return None
+        lats = [lat for _, lat in points]
+        lons = [lon for lon, _ in points]
+        print("[terrain] DEM missing — attempting SRTM auto-download …")
+        if _download_srtm(dem_path, lats, lons):
+            print(f"[terrain] SRTM downloaded → {dem_path}")
+        else:
+            print("[terrain] SRTM download failed — using Open-Elevation API")
+            return _open_elevation_fallback(points)
 
     dem_dir = dem_path.parent
 
@@ -158,5 +267,5 @@ def extract_terrain(
             [elevation, slope_deg, aspect_deg, twi, curvature, northness, eastness]
         )
 
-    # Fall back to on-the-fly computation
+    # Fall back to on-the-fly computation from dem.tif
     return _compute_from_dem(dem_path, points)
