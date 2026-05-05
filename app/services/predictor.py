@@ -116,8 +116,14 @@ def _aggregate(
     preds = pipeline.predict(df)
     probas = pipeline.predict_proba(df)  # (N, C)
 
+    # Actual classes the pipeline was fitted with (may differ from meta class_names)
+    try:
+        fitted_classes = [int(c) for c in pipeline[-1].classes_]
+    except Exception:
+        fitted_classes = list(range(probas.shape[1]))
+
     # Dominant class: most frequent predicted label
-    pred_labels = [class_names[int(p)] for p in preds]
+    pred_labels = [class_names[int(p)] if int(p) < len(class_names) else str(p) for p in preds]
     dominant = Counter(pred_labels).most_common(1)[0][0]
 
     # Class distribution: fraction of points per class
@@ -125,10 +131,11 @@ def _aggregate(
     total = len(pred_labels)
     distribution = {cls: round(label_counts.get(cls, 0) / total, 4) for cls in class_names}
 
-    # Mean probability per class across all points
-    mean_proba = {
-        cls: round(float(probas[:, i].mean()), 4) for i, cls in enumerate(class_names)
-    }
+    # Mean probability per class — map fitted class index → class_name
+    mean_proba = {cls: 0.0 for cls in class_names}
+    for col_i, cls_idx in enumerate(fitted_classes):
+        if cls_idx < len(class_names) and col_i < probas.shape[1]:
+            mean_proba[class_names[cls_idx]] = round(float(probas[:, col_i].mean()), 4)
 
     return NutrientPrediction(
         dominant_class=dominant,
