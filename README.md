@@ -147,32 +147,77 @@ Interactive API docs: `http://localhost:8000/docs`
 
 ## API reference
 
+Base URL: `https://your-domain.up.railway.app`
+Interactive docs: `https://your-domain.up.railway.app/docs`
+
+---
+
+### `GET /health`
+
+Health check. Use this to confirm the service is running.
+
+```
+GET /health
+```
+
+**Response**
+```json
+{ "status": "ok" }
+```
+
+---
+
 ### `GET /predict` — bounding box
+
+Quick rectangular query. Useful for map-based clients and mobile apps.
 
 ```
 GET /predict?minlon=120.50&minlat=16.40&maxlon=120.51&maxlat=16.41&crop_type=cabbage
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `minlon` | float | required | West boundary longitude |
-| `minlat` | float | required | South boundary latitude |
-| `maxlon` | float | required | East boundary longitude |
-| `maxlat` | float | required | North boundary latitude |
-| `crop_type` | string | `"unknown"` | Crop type (cabbage, tomato, potato, …) |
-| `temperature_c` | float | 18.0 | Air temperature in °C |
-| `humidity_percent` | float | 80.0 | Relative humidity % |
-| `sample_spacing_m` | float 5–100 | 10.0 | Grid spacing in metres |
+**Query parameters**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `minlon` | float | yes | — | West boundary longitude |
+| `minlat` | float | yes | — | South boundary latitude |
+| `maxlon` | float | yes | — | East boundary longitude |
+| `maxlat` | float | yes | — | North boundary latitude |
+| `crop_type` | string | no | `"unknown"` | Crop type e.g. `cabbage`, `tomato`, `potato` |
+| `temperature_c` | float | no | `18.0` | Air temperature in °C |
+| `humidity_percent` | float | no | `80.0` | Relative humidity % |
+| `sample_spacing_m` | float | no | `10.0` | Grid sampling spacing in metres (5–100) |
+
+**Example**
+```
+GET /predict?minlon=120.596&minlat=16.462&maxlon=120.608&maxlat=16.471&crop_type=cabbage&sample_spacing_m=20
+```
+
+---
 
 ### `POST /predict` — GeoJSON polygon
 
-**Request body**
+Exact field boundary query. Use this when you have a real field polygon from a GIS app.
 
+```
+POST /predict
+Content-Type: application/json
+```
+
+**Request body**
 ```json
 {
   "polygon": {
     "type": "Polygon",
-    "coordinates": [[[120.5, 16.4], [120.51, 16.4], [120.51, 16.41], [120.5, 16.41], [120.5, 16.4]]]
+    "coordinates": [
+      [
+        [120.596, 16.462],
+        [120.608, 16.462],
+        [120.608, 16.471],
+        [120.596, 16.471],
+        [120.596, 16.462]
+      ]
+    ]
   },
   "crop_type": "cabbage",
   "temperature_c": 18.0,
@@ -181,29 +226,52 @@ GET /predict?minlon=120.50&minlat=16.40&maxlon=120.51&maxlat=16.41&crop_type=cab
 }
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `polygon` | GeoJSON Geometry | required | Polygon or MultiPolygon |
-| `crop_type` | string | `"unknown"` | Crop type (cabbage, tomato, potato, …) |
-| `temperature_c` | float | 18.0 | Air temperature in °C |
-| `humidity_percent` | float | 80.0 | Relative humidity % |
-| `sample_spacing_m` | float 5–100 | 10.0 | Grid spacing in metres |
+**Fields**
 
-**Response** (same shape for both GET and POST)
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `polygon` | GeoJSON Geometry | yes | — | `Polygon` or `MultiPolygon` in WGS84 |
+| `crop_type` | string | no | `"unknown"` | Crop type e.g. `cabbage`, `tomato`, `potato` |
+| `temperature_c` | float | no | `18.0` | Air temperature in °C |
+| `humidity_percent` | float | no | `80.0` | Relative humidity % |
+| `sample_spacing_m` | float | no | `10.0` | Grid sampling spacing in metres (5–100) |
+
+---
+
+### Response (both endpoints return the same shape)
 
 ```json
 {
   "nitrogen": {
     "dominant_class": "Low",
-    "class_distribution": {"Low": 0.72, "Medium": 0.28, "High": 0.0},
-    "mean_probability":   {"Low": 0.68, "Medium": 0.29, "High": 0.03}
+    "class_distribution": {
+      "Low": 0.72,
+      "Medium": 0.28,
+      "High": 0.0
+    },
+    "mean_probability": {
+      "Low": 0.68,
+      "Medium": 0.29,
+      "High": 0.03
+    }
   },
-  "phosphorus": { "..." },
-  "potassium":  { "..." },
+  "phosphorus": {
+    "dominant_class": "Medium",
+    "class_distribution": {"Low": 0.1, "Medium": 0.8, "High": 0.1},
+    "mean_probability":   {"Low": 0.09, "Medium": 0.78, "High": 0.13}
+  },
+  "potassium": {
+    "dominant_class": "Low",
+    "class_distribution": {"Low": 0.65, "Medium": 0.35, "High": 0.0},
+    "mean_probability":   {"Low": 0.61, "Medium": 0.37, "High": 0.02}
+  },
   "ph": {
     "dominant_class": "6.4",
-    "class_distribution": {"4.0": 0.0, "6.4": 0.61, "6.8": 0.39},
-    "mean_probability":   {"4.0": 0.0, "6.4": 0.58, "6.8": 0.41}
+    "class_distribution": {
+      "4.0": 0.0, "4.4": 0.0, "4.8": 0.0, "5.2": 0.0, "5.4": 0.0,
+      "5.8": 0.0, "6.0": 0.12, "6.4": 0.61, "6.8": 0.27, "7.2": 0.0, "7.6": 0.0
+    },
+    "mean_probability": { "...": "..." }
   },
   "sample_count": 143,
   "polygon_area_ha": 1.43,
@@ -211,9 +279,25 @@ GET /predict?minlon=120.50&minlat=16.40&maxlon=120.51&maxlat=16.41&crop_type=cab
 }
 ```
 
-### `GET /health`
+**Response fields**
 
-Returns `{"status": "ok"}`.
+| Field | Description |
+|-------|-------------|
+| `nitrogen` / `phosphorus` / `potassium` | N, P, K prediction — Low / Medium / High |
+| `ph` | pH prediction on the 11-class CPR scale (4.0 – 7.6) |
+| `dominant_class` | Most common predicted class across all sampled grid points |
+| `class_distribution` | Fraction of grid points assigned to each class |
+| `mean_probability` | Average model confidence per class across all grid points |
+| `sample_count` | Number of 10 m grid points sampled inside the polygon |
+| `polygon_area_ha` | Polygon area in hectares |
+| `warnings` | Non-fatal issues e.g. sample count capped, DEM missing |
+
+**HTTP error codes**
+
+| Code | Meaning |
+|------|---------|
+| `422` | Invalid polygon or bbox |
+| `503` | Sentinel-2 data not found on the server |
 
 ---
 
