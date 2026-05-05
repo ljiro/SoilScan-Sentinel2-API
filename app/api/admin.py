@@ -9,7 +9,9 @@ Predefined targets map friendly names to the correct Volume paths so callers
 don't need to know the internal directory layout.
 """
 import re
+import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -123,3 +125,64 @@ def list_files(x_admin_token: Optional[str] = Header(default=None)):
             "size_mb": round(p.stat().st_size / 1e6, 2) if p.exists() else None,
         }
     return result
+
+
+class UnzipRequest(BaseModel):
+    url: str
+    dest_dir: str  # one of: "soilgrids", "sentinel2", "dem"
+
+
+_UNZIP_DIRS = {
+    "soilgrids":  lambda: settings.soilgrids_dir,
+    "sentinel2":  lambda: settings.sentinel2_dir,
+    "dem":        lambda: settings.dem_path.parent,
+}
+
+
+@router.post("/unzip")
+def unzip_file(
+    req: UnzipRequest,
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """
+    Download a zip from a URL (including Google Drive) and extract it into a Volume directory.
+
+    dest_dir must be one of: soilgrids, sentinel2, dem.
+    Requires the X-Admin-Token header.
+    """
+    _check_token(x_admin_token)
+
+    if req.dest_dir not in _UNZIP_DIRS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown dest_dir '{req.dest_dir}'. Valid options: {list(_UNZIP_DIRS.keys())}",
+        )
+
+    dest_dir: Path = _UNZIP_DIRS[req.dest_dir]()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        if _GDRIVE_RE.search(req.url):
+            gdown.download(req.url, str(tmp_path), quiet=False)
+        else:
+            urllib.request.urlretrieve(req.url, tmp_path)
+
+        with zipfile.ZipFile(tmp_path, "r") as zf:
+            zf.extractall(dest_dir)
+            extracted = zf.namelist()
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=502, detail="Downloaded file is not a valid zip.")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Unzip failed: {exc}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    return {
+        "status": "ok",
+        "dest_dir": str(dest_dir),
+        "files_extracted": len(extracted),
+        "files": extracted,
+    }
