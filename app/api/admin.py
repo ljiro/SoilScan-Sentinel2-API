@@ -187,8 +187,18 @@ def unzip_file(
             urllib.request.urlretrieve(req.url, tmp_path)
 
         with zipfile.ZipFile(tmp_path, "r") as zf:
-            zf.extractall(dest_dir)
-            extracted = zf.namelist()
+            extracted = []
+            for member in zf.infolist():
+                # Normalize Windows backslash paths so they extract correctly on Linux
+                norm_name = member.filename.replace("\\", "/")
+                dest_file = dest_dir / norm_name
+                if member.is_dir() or norm_name.endswith("/"):
+                    dest_file.mkdir(parents=True, exist_ok=True)
+                else:
+                    dest_file.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(member) as src, open(dest_file, "wb") as dst:
+                        dst.write(src.read())
+                    extracted.append(norm_name)
     except zipfile.BadZipFile:
         raise HTTPException(status_code=502, detail="Downloaded file is not a valid zip.")
     except Exception as exc:
