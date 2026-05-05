@@ -13,13 +13,139 @@ A FastAPI backend that accepts a GIS polygon or bounding box, queries locally do
 
 ## How it works
 
-1. **Polygon sampling** — generates a regular 10 m grid of points inside the input polygon
-2. **Sentinel-2 extraction** — samples all 12 spectral bands (B01–B12, B8A) from local `.SAFE` tiles using a 3×3 pixel neighbourhood
-3. **SoilGrids extraction** — reads 12 soil prior columns (pH, SOC, N, clay, sand, CEC at 0–5 cm and 5–15 cm depths) from local GeoTIFF/VRT files
-4. **Terrain extraction** — derives elevation, slope, aspect, TWI, curvature, northness, eastness from a local DEM
-5. **Spectral indices** — computes NDVI, EVI, SAVI, MSAVI, NDRE, CHL-re, BSI, BI, NDWI, NDMI on the fly
-6. **Inference** — assembles a 57-feature DataFrame and runs it through four sklearn Pipeline models
-7. **Aggregation** — majority-votes predictions across all sampled points and returns class distributions
+### Step 1 — Polygon → grid of sample points
+
+The input polygon (GeoJSON or bounding box) is projected to UTM and filled with a regular grid of points at 10 m spacing (matching Sentinel-2 native resolution). Only points that fall **inside** the polygon boundary are kept.
+
+```
+Polygon boundary
+┌─────────────────┐
+│  · · · · · · ·  │
+│  · · · · · · ·  │  ← each · is a (lon, lat) point 10 m apart
+│  · · · · · · ·  │
+└─────────────────┘
+```
+
+A 1 hectare field produces ~100 sample points. The maximum is capped at 500 points per request (configurable via `SOILSCAN_MAX_SAMPLE_POINTS`).
+
+---
+
+### Step 2 — Each point → spectral band values
+
+For every sample point the extractor performs a coordinate-to-pixel lookup against the local Sentinel-2 GeoTIFF:
+
+1. Transform `(lon, lat)` from WGS84 → raster CRS (UTM Zone 51N)
+2. Convert the UTM coordinate to a pixel `(row, col)` index using rasterio
+3. Read a **3×3 pixel window** (30×30 m neighbourhood) centred on that pixel
+4. Take `nanmean` across the 9 pixels as the band value for that point
+
+```
+Sentinel-2 raster (10 m pixels)
+┌───┬───┬───┬───┬───┐
+│   │   │   │   │   │
+├───┼───┼───┼───┼───┤
+│   │ █ │ █ │ █ │   │
+├───┼───┼───┼───┼───┤  ← 3×3 window read around the matched pixel
+│   │ █ │ ✦ │ █ │   │  ✦ = sample point projected to raster CRS
+├───┼───┼───┼───┼───┤
+│   │ █ │ █ │ █ │   │
+├───┼───┼───┼───┼───┤
+│   │   │   │   │   │
+└───┴───┴───┴───┴───┘
+band_value = nanmean(9 pixels)
+```
+
+This is repeated for all 12 bands (B01–B12, B8A) producing a `(N, 12)` array where N is the number of sample points. If multiple Sentinel-2 tiles are available for the same area, the mean and standard deviation across tiles are computed — giving 24 spectral features total (12 band means + 12 temporal stds).
+
+The 3×3 neighbourhood smooths out sub-pixel GPS registration errors and matches the exact sampling logic used during model training.
+
+---
+
+### Step 3 — Each point → SoilGrids priors
+
+The same coordinate-to-pixel lookup is applied to locally stored SoilGrids v2 GeoTIFFs (250 m resolution). Six soil properties are read at two depths (0–5 cm, 5–15 cm):
+
+| Property | Unit | What it captures |
+|----------|------|-----------------|
+| `phh2o` | pH | Soil acidity / alkalinity |
+| `soc` | dg/kg | Soil organic carbon |
+| `nitrogen` | cg/kg | Total nitrogen stock |
+| `clay` | g/kg | Clay particle fraction |
+| `sand` | g/kg | Sand particle fraction |
+| `cec` | mmol/kg | Cation exchange capacity |
+
+This gives 12 SoilGrids features per point (`sg_{property}_{depth}`).
+
+---
+
+### Step 4 — Each point → terrain features
+
+A local DEM GeoTIFF is sampled at each point (or pre-computed terrain rasters if available) to extract 7 terrain attributes:
+
+| Feature | Description |
+|---------|-------------|
+| `elevation_m` | Elevation above sea level |
+| `slope_deg` | Steepness of terrain |
+| `aspect_deg` | Direction the slope faces (0=North, clockwise) |
+| `twi` | Topographic Wetness Index — proxy for soil moisture accumulation |
+| `curvature` | Surface concavity/convexity |
+| `northness` | cos(aspect) — how north-facing the slope is |
+| `eastness` | sin(aspect) — how east-facing the slope is |
+
+---
+
+### Step 5 — Spectral indices computed on the fly
+
+Ten spectral indices are derived from the raw band values at each point. These capture vegetation health, soil exposure, and moisture — the primary signals the models were trained on:
+
+| Index | Formula | Captures |
+|-------|---------|---------|
+| NDVI | (B08−B04)/(B08+B04) | Vegetation density |
+| EVI | 2.5×(B08−B04)/(B08+6×B04−7.5×B02+1) | Canopy greenness (soil-adjusted) |
+| SAVI | 1.5×(B08−B04)/(B08+B04+0.5) | Vegetation with soil correction |
+| MSAVI | (2×B08+1−√((2×B08+1)²−8×(B08−B04)))/2 | Modified soil adjustment |
+| NDRE | (B8A−B05)/(B8A+B05) | Chlorophyll / nitrogen stress |
+| CHL-re | (B8A/B05)−1 | Canopy chlorophyll content |
+| BSI | ((B11+B04)−(B08+B02))/((B11+B04)+(B08+B02)) | Bare soil exposure |
+| BI | √((B04²+B08²)/2) | Overall surface brightness |
+| NDWI | (B03−B08)/(B03+B08) | Surface water / moisture |
+| NDMI | (B08−B11)/(B08+B11) | Dry matter / canopy water |
+
+---
+
+### Step 6 — Feature assembly (57 features per point)
+
+All features are concatenated into a single row per sample point:
+
+```
+[ B01…B12 (12) ]  +  [ B01_std…B12_std (12) ]  +  [ temp, humidity, altitude (3) ]
++  [ elevation…eastness (7) ]  +  [ sg_phh2o…sg_cec (12) ]
++  [ NDVI…NDMI (10) ]  +  [ crop_type (1, one-hot encoded inside pipeline) ]
+= 57 input features
+```
+
+The sklearn Pipeline embedded in each `.joblib` model file handles StandardScaler normalisation and OneHotEncoding automatically — no manual preprocessing needed at inference time.
+
+---
+
+### Step 7 — Inference and aggregation
+
+Each of the four models runs independently on all N sample points:
+
+```
+point_1 → Low N,  Medium P,  Low K,  pH 6.4
+point_2 → Low N,  Medium P,  Low K,  pH 6.0
+point_3 → Low N,  High P,    Low K,  pH 6.4
+   ...
+─────────────────────────────────────────────────────
+polygon → dominant: Low N · Medium P · Low K · pH 6.4
+          distribution: N={Low:1.0} P={Low:0.1, Medium:0.67, High:0.33} ...
+```
+
+The response includes:
+- **`dominant_class`** — majority prediction across all points
+- **`class_distribution`** — fraction of points per class (spatial variability within the field)
+- **`mean_probability`** — average model confidence per class
 
 ## Project structure
 
