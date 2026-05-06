@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.predict import router as predict_router
 from app.api.admin import router as admin_router
@@ -11,6 +12,13 @@ app = FastAPI(
         "(N, P, K, pH) using trained Random Forest / SVM classifiers."
     ),
     version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 app.include_router(predict_router, tags=["Inference"])
